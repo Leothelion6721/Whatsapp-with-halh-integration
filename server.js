@@ -21,6 +21,8 @@ const io = socketIo(server, {
 
 // JWT Secret (in production, use environment variable)
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this-in-production';
+// Max file size for multer (10MB)
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 // Create necessary directories
 const uploadsDir = path.join(__dirname, 'uploads');
@@ -36,28 +38,31 @@ if (!fs.existsSync(dataDir)) {
 // Configure multer for file uploads
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        cb(null, 'uploads/')
+        // Ensure the path is correct
+        cb(null, uploadsDir + '/') 
     },
     filename: function (req, file, cb) {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, uniqueSuffix + '-' + file.originalname);
+        cb(null, uniqueSuffix + '-' + file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')); // Sanitize filename
     }
 });
 
 const upload = multer({ 
     storage: storage,
     limits: {
-        fileSize: 10 * 1024 * 1024
+        fileSize: MAX_FILE_SIZE
     },
     fileFilter: function (req, file, cb) {
         const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx|txt|zip|mp4|mp3|webm/;
         const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-        const mimetype = allowedTypes.test(file.mimetype);
+        // Stricter Mime-type check
+        const allowedMime = allowedTypes.test(file.mimetype.toLowerCase()); 
         
-        if (extname && mimetype) {
+        // Check for both extension and mimetype
+        if (extname && allowedMime) {
             return cb(null, true);
         } else {
-            cb(new Error('Invalid file type'));
+            cb(new Error('Invalid file type or format'));
         }
     }
 });
@@ -66,13 +71,16 @@ const upload = multer({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.static('public'));
-app.use('/uploads', express.static('uploads'));
+app.use('/uploads', express.static(uploadsDir)); // Use uploadsDir variable
 
 // In-memory storage with persistence
 let users = new Map();
 let messages = new Map();
 let chats = new Map();
-let sessions = new Map();
+// NEW: A map for fast lookup by userId (for REST/middleware)
+let usersByUserId = new Map(); 
+// sessions map remains for JWT to userId mapping on server side (optional, but kept for consistency)
+let sessions = new Map(); 
 
 // Load data from files if they exist
 function loadData() {
@@ -80,6 +88,10 @@ function loadData() {
         if (fs.existsSync(path.join(dataDir, 'users.json'))) {
             const usersData = JSON.parse(fs.readFileSync(path.join(dataDir, 'users.json'), 'utf8'));
             users = new Map(usersData);
+            // REBUILD usersByUserId map on load
+            users.forEach(user => {
+                usersByUserId.set(user.userId, user);
+            });
         }
         if (fs.existsSync(path.join(dataDir, 'messages.json'))) {
             const messagesData = JSON.parse(fs.readFileSync(path.join(dataDir, 'messages.json'), 'utf8'));
@@ -143,6 +155,31 @@ function verifyToken(token) {
     }
 }
 
+// NEW: Authentication Middleware
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    // Extract token from 'Bearer <token>'
+    const token = authHeader && authHeader.split(' ')[1]; 
+
+    if (token == null) {
+        return res.status(401).json({ error: 'Authentication token required' });
+    }
+
+    const userId = verifyToken(token);
+    if (!userId) {
+        return res.status(403).json({ error: 'Invalid or expired token' });
+    }
+
+    const currentUser = usersByUserId.get(userId);
+    if (!currentUser) {
+        return res.status(404).json({ error: 'User not found' });
+    }
+
+    req.userId = userId;
+    req.currentUser = currentUser;
+    next();
+};
+
 // REST API Endpoints
 
 // Register endpoint
@@ -153,7 +190,10 @@ app.post('/api/register', async (req, res) => {
         return res.status(400).json({ error: 'Username and password are required' });
     }
     
-    if (username.length < 3 || username.length > 20) {
+    // Trim and normalize username
+    const cleanUsername = username.trim().toLowerCase(); 
+
+    if (cleanUsername.length < 3 || cleanUsername.length > 20) {
         return res.status(400).json({ error: 'Username must be 3-20 characters' });
     }
     
@@ -161,22 +201,26 @@ app.post('/api/register', async (req, res) => {
         return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
     
-    if (users.has(username)) {
+    if (users.has(cleanUsername)) {
         return res.status(400).json({ error: 'Username already exists' });
     }
     
     const hashedPassword = await bcrypt.hash(password, 10);
     const userId = generateId();
     
-    users.set(username, {
+    const newUser = {
         userId,
         password: hashedPassword,
-        username,
+        username: cleanUsername,
         contacts: [],
         createdAt: Date.now(),
         online: false,
         socketId: null
-    });
+    };
+
+    users.set(cleanUsername, newUser);
+    // NEW: Add to lookup map
+    usersByUserId.set(userId, newUser); 
     
     saveData();
     
@@ -187,7 +231,7 @@ app.post('/api/register', async (req, res) => {
         success: true, 
         token,
         userId,
-        username
+        username: cleanUsername
     });
 });
 
@@ -199,7 +243,9 @@ app.post('/api/login', async (req, res) => {
         return res.status(400).json({ error: 'Username and password are required' });
     }
     
-    const user = users.get(username);
+    const cleanUsername = username.trim().toLowerCase();
+    
+    const user = users.get(cleanUsername);
     if (!user) {
         return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -220,70 +266,72 @@ app.post('/api/login', async (req, res) => {
     });
 });
 
-// Add contact endpoint
-app.post('/api/add-contact', async (req, res) => {
-    const { token, contactUsername } = req.body;
-    
-    const userId = verifyToken(token);
-    if (!userId) {
-        return res.status(401).json({ error: 'Invalid token' });
+// NEW: File upload endpoint
+app.post('/api/upload', authenticateToken, upload.single('file'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
     }
     
-    let currentUser = null;
-    for (const [username, user] of users.entries()) {
-        if (user.userId === userId) {
-            currentUser = user;
-            break;
-        }
-    }
+    // Construct the file information object
+    const fileInfo = {
+        filename: req.file.filename,
+        originalName: req.file.originalname,
+        mimetype: req.file.mimetype,
+        size: req.file.size,
+        url: `/uploads/${req.file.filename}` // Client can access this URL
+    };
+
+    res.json({ 
+        success: true,
+        file: fileInfo
+    });
+});
+
+
+// Add contact endpoint - NOW uses authenticateToken middleware
+app.post('/api/add-contact', authenticateToken, async (req, res) => {
+    const { contactUsername } = req.body;
+    // User is available via req.currentUser from the middleware
+    const currentUser = req.currentUser;
     
-    if (!currentUser) {
-        return res.status(404).json({ error: 'User not found' });
+    if (!contactUsername) {
+        return res.status(400).json({ error: 'Contact username is required' });
     }
+
+    const cleanContactUsername = contactUsername.trim().toLowerCase();
     
-    if (!users.has(contactUsername)) {
+    if (!users.has(cleanContactUsername)) {
         return res.status(404).json({ error: 'Contact username does not exist' });
     }
     
-    if (currentUser.contacts.includes(contactUsername)) {
+    if (currentUser.username === cleanContactUsername) {
+        return res.status(400).json({ error: 'Cannot add yourself as a contact' });
+    }
+
+    if (currentUser.contacts.includes(cleanContactUsername)) {
         return res.status(400).json({ error: 'Contact already added' });
     }
     
-    currentUser.contacts.push(contactUsername);
+    currentUser.contacts.push(cleanContactUsername);
     saveData();
     
     res.json({ success: true, message: 'Contact added successfully' });
 });
 
-// Get contacts endpoint
-app.post('/api/get-contacts', async (req, res) => {
-    const { token } = req.body;
-    
-    const userId = verifyToken(token);
-    if (!userId) {
-        return res.status(401).json({ error: 'Invalid token' });
-    }
-    
-    let currentUser = null;
-    for (const [username, user] of users.entries()) {
-        if (user.userId === userId) {
-            currentUser = user;
-            break;
-        }
-    }
-    
-    if (!currentUser) {
-        return res.status(404).json({ error: 'User not found' });
-    }
+// Get contacts endpoint - NOW uses authenticateToken middleware
+app.post('/api/get-contacts', authenticateToken, async (req, res) => {
+    // User is available via req.currentUser from the middleware
+    const currentUser = req.currentUser;
     
     const contacts = currentUser.contacts.map(contactUsername => {
         const contact = users.get(contactUsername);
         return {
             username: contactUsername,
-            online: contact ? contact.online : false,
+            // Safety check for case where contact might have been deleted but user list not cleaned up
+            online: contact ? contact.online : false, 
             userId: contact ? contact.userId : null
         };
-    });
+    }).filter(contact => contact.userId !== null); // Filter out null contacts
     
     res.json({ contacts });
 });
@@ -304,29 +352,33 @@ io.on('connection', (socket) => {
             return;
         }
         
-        let user = null;
-        for (const [username, userData] of users.entries()) {
-            if (userData.userId === userId) {
-                user = userData;
-                currentUsername = username;
-                break;
-            }
-        }
+        // Use the new lookup map for O(1) performance
+        const user = usersByUserId.get(userId);
         
         if (!user) {
             socket.emit('auth-failed', { error: 'User not found' });
             return;
         }
         
+        // Set user details and status
         user.socketId = socket.id;
         user.online = true;
         currentUserId = userId;
+        currentUsername = user.username; // Assign the username
+
+        // Join a room specific to the user for easy direct messaging
+        socket.join(currentUsername); 
         
         const userChats = [];
+        // Use user.contacts for the filter
+        const contactUsernames = new Set(user.contacts); 
+        
         for (const [chatId, chat] of chats.entries()) {
             if (chat.participants.includes(currentUsername)) {
                 const otherParticipant = chat.participants.find(p => p !== currentUsername);
-                if (user.contacts.includes(otherParticipant)) {
+                
+                // Only show chats with actual contacts
+                if (contactUsernames.has(otherParticipant)) {
                     const chatMessages = messages.get(chatId) || [];
                     const lastMessage = chatMessages[chatMessages.length - 1];
                     const otherUser = users.get(otherParticipant);
@@ -341,7 +393,7 @@ io.on('connection', (socket) => {
                             time: lastMessage.timestamp
                         } : null,
                         online: otherUser ? otherUser.online : false,
-                        unread: 0
+                        unread: 0 // In a real app, this would be calculated
                     });
                 }
             }
@@ -354,13 +406,12 @@ io.on('connection', (socket) => {
             contacts: user.contacts
         });
         
+        // Broadcast online status to contacts
         user.contacts.forEach(contactUsername => {
-            const contact = users.get(contactUsername);
-            if (contact && contact.online && contact.socketId) {
-                io.to(contact.socketId).emit('contact-online', { 
-                    username: currentUsername 
-                });
-            }
+            // Use rooms for efficient broadcasting
+            io.to(contactUsername).emit('contact-online', { 
+                username: currentUsername 
+            });
         });
         
         saveData();
@@ -380,7 +431,7 @@ io.on('connection', (socket) => {
                 online: contact ? contact.online : false,
                 userId: contact ? contact.userId : null
             };
-        });
+        }).filter(contact => contact.userId !== null);
         
         socket.emit('contacts-list', contactsList);
     });
@@ -421,8 +472,9 @@ io.on('connection', (socket) => {
             messages: messages.get(chatId) || []
         });
         
-        if (targetUser.online && targetUser.socketId && targetUser.contacts.includes(currentUsername)) {
-            io.to(targetUser.socketId).emit('new-chat', {
+        // Notify the target user using their room
+        if (targetUser.contacts.includes(currentUsername)) {
+             io.to(targetUser.username).emit('new-chat', {
                 chatId,
                 name: currentUsername,
                 type: 'private',
@@ -433,7 +485,8 @@ io.on('connection', (socket) => {
     });
 
     socket.on('send-message', (data) => {
-        const { chatId, text, file } = data;
+        // file is now expected to be a fileInfo object (from REST upload) or null
+        const { chatId, text, file } = data; 
         
         if (!currentUsername || !chatId) return;
         if (!text && !file) return;
@@ -444,17 +497,21 @@ io.on('connection', (socket) => {
         const currentUser = users.get(currentUsername);
         const otherParticipant = chat.participants.find(p => p !== currentUsername);
         
+        // Security check: ensure participant is a contact
         if (!currentUser.contacts.includes(otherParticipant)) {
             socket.emit('message-error', { error: 'Cannot send message to non-contact' });
             return;
         }
         
+        // Sanitize file object
+        const finalFile = file && file.url && file.filename ? file : null;
+
         const message = {
             id: generateId(),
             chatId,
             senderUsername: currentUsername,
-            text: text || '',
-            file: file || null,
+            text: text ? text.trim() : '',
+            file: finalFile,
             timestamp: Date.now(),
             read: false
         };
@@ -466,9 +523,11 @@ io.on('connection', (socket) => {
         
         chat.participants.forEach(participantUsername => {
             const participant = users.get(participantUsername);
-            if (participant && participant.online && participant.socketId) {
+            // Use room for sending message
+            if (participant && participant.online) {
+                // Only send to participant if they are the sender, or if they have the sender as a contact
                 if (participantUsername === currentUsername || participant.contacts.includes(currentUsername)) {
-                    io.to(participant.socketId).emit('new-message', {
+                    io.to(participant.username).emit('new-message', { 
                         chatId,
                         message: {
                             id: message.id,
@@ -485,39 +544,8 @@ io.on('connection', (socket) => {
         
         console.log(`Message sent in chat ${chatId} by ${currentUsername}`);
     });
-
-    socket.on('upload-file', async (data) => {
-        const { chatId, fileData, fileName, fileType } = data;
-        
-        if (!currentUsername || !chatId || !fileData) return;
-        
-        try {
-            const uniqueFilename = Date.now() + '-' + Math.round(Math.random() * 1E9) + '-' + fileName;
-            const filePath = path.join(uploadsDir, uniqueFilename);
-            
-            const base64Data = fileData.replace(/^data:.*?;base64,/, '');
-            const buffer = Buffer.from(base64Data, 'base64');
-            
-            fs.writeFileSync(filePath, buffer);
-            
-            const fileInfo = {
-                filename: uniqueFilename,
-                originalName: fileName,
-                mimetype: fileType,
-                size: buffer.length,
-                url: `/uploads/${uniqueFilename}`
-            };
-            
-            socket.emit('file-uploaded', {
-                chatId,
-                file: fileInfo
-            });
-            
-        } catch (error) {
-            console.error('File upload error:', error);
-            socket.emit('upload-error', { error: 'Failed to upload file' });
-        }
-    });
+    
+    // REMOVED 'upload-file' event logic (now handled by REST API)
 
     socket.on('add-contact', async (data) => {
         const { contactUsername } = data;
@@ -527,27 +555,44 @@ io.on('connection', (socket) => {
         const currentUser = users.get(currentUsername);
         if (!currentUser) return;
         
-        if (!users.has(contactUsername)) {
+        const cleanContactUsername = contactUsername.trim().toLowerCase();
+        
+        if (!users.has(cleanContactUsername)) {
             socket.emit('contact-error', { error: 'User does not exist' });
             return;
         }
         
-        if (currentUser.contacts.includes(contactUsername)) {
+        if (currentUser.contacts.includes(cleanContactUsername)) {
             socket.emit('contact-error', { error: 'Already in contacts' });
             return;
         }
         
-        currentUser.contacts.push(contactUsername);
+        if (currentUser.username === cleanContactUsername) {
+            socket.emit('contact-error', { error: 'Cannot add yourself' });
+            return;
+        }
+
+        currentUser.contacts.push(cleanContactUsername);
         saveData();
         
-        const contact = users.get(contactUsername);
+        const contact = users.get(cleanContactUsername);
+        
         socket.emit('contact-added', {
-            username: contactUsername,
+            username: cleanContactUsername,
             online: contact ? contact.online : false,
             userId: contact ? contact.userId : null
         });
+
+        // Notify the newly added contact if they are online and the sender is in their contacts
+        if (contact && contact.online && contact.contacts.includes(currentUsername)) {
+             io.to(contact.username).emit('contact-added-by-other', {
+                username: currentUsername,
+                online: currentUser.online,
+                userId: currentUser.userId
+            });
+        }
         
-        console.log(`${currentUsername} added ${contactUsername} as contact`);
+        console.log(`${currentUsername} added ${cleanContactUsername} as contact`);
     });
 
     socket.on('remove-contact', async (data) => {
@@ -558,12 +603,14 @@ io.on('connection', (socket) => {
         const currentUser = users.get(currentUsername);
         if (!currentUser) return;
         
-        currentUser.contacts = currentUser.contacts.filter(c => c !== contactUsername);
+        const cleanContactUsername = contactUsername.trim().toLowerCase();
+
+        currentUser.contacts = currentUser.contacts.filter(c => c !== cleanContactUsername);
         saveData();
         
-        socket.emit('contact-removed', { username: contactUsername });
+        socket.emit('contact-removed', { username: cleanContactUsername });
         
-        console.log(`${currentUsername} removed ${contactUsername} from contacts`);
+        console.log(`${currentUsername} removed ${cleanContactUsername} from contacts`);
     });
 
     socket.on('typing', (data) => {
@@ -577,14 +624,13 @@ io.on('connection', (socket) => {
         chat.participants.forEach(participantUsername => {
             if (participantUsername !== currentUsername) {
                 const participant = users.get(participantUsername);
-                if (participant && participant.online && participant.socketId) {
-                    if (participant.contacts.includes(currentUsername)) {
-                        io.to(participant.socketId).emit('user-typing', {
-                            chatId,
-                            username: currentUsername,
-                            isTyping
-                        });
-                    }
+                // Use room for sending typing indicator
+                if (participant && participant.online && participant.contacts.includes(currentUsername)) {
+                    io.to(participant.username).emit('user-typing', {
+                        chatId,
+                        username: currentUsername,
+                        isTyping
+                    });
                 }
             }
         });
@@ -627,14 +673,14 @@ io.on('connection', (socket) => {
             if (user) {
                 user.online = false;
                 user.socketId = null;
+                // Leave the room
+                socket.leave(currentUsername); 
                 
+                // Broadcast offline status to contacts using rooms
                 user.contacts.forEach(contactUsername => {
-                    const contact = users.get(contactUsername);
-                    if (contact && contact.online && contact.socketId) {
-                        io.to(contact.socketId).emit('contact-offline', {
-                            username: currentUsername
-                        });
-                    }
+                    io.to(contactUsername).emit('contact-offline', {
+                        username: currentUsername
+                    });
                 });
                 
                 saveData();
@@ -663,12 +709,18 @@ app.get('/', (req, res) => {
 
 // Error handling middleware
 app.use((error, req, res, next) => {
+    console.error('Express Error:', error.message);
     if (error instanceof multer.MulterError) {
         if (error.code === 'LIMIT_FILE_SIZE') {
-            return res.status(400).json({ error: 'File too large. Maximum size is 10MB' });
+            return res.status(400).json({ error: `File too large. Maximum size is ${MAX_FILE_SIZE / (1024 * 1024)}MB` });
         }
     }
-    res.status(500).json({ error: error.message });
+    // Handle the custom Invalid file type error
+    if (error.message === 'Invalid file type' || error.message === 'Invalid file type or format') {
+        return res.status(400).json({ error: error.message });
+    }
+    // Default to 500
+    res.status(500).json({ error: 'Server error: ' + error.message });
 });
 
 // Graceful shutdown
@@ -683,7 +735,7 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 WhatsApp Clone Server running on port ${PORT}`);
     console.log(`🔐 Authentication enabled with password protection`);
     console.log(`👥 Contact list feature enabled`);
-    console.log(`📎 File upload feature enabled`);
+    console.log(`📎 File upload feature enabled (REST API)`); // Updated
     console.log(`💾 Data persistence enabled`);
     console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
 });
