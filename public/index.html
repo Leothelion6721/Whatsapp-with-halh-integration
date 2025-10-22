@@ -592,7 +592,6 @@
     </style>
 </head>
 <body>
-    <!-- Auth Screen -->
     <div class="auth-screen" id="authScreen">
         <div class="auth-box">
             <h1>🔐 Secure WhatsApp</h1>
@@ -614,9 +613,7 @@
         </div>
     </div>
 
-    <!-- Chat Screen -->
     <div class="chat-screen" id="chatScreen">
-        <!-- Sidebar -->
         <div class="sidebar" id="sidebar">
             <div class="sidebar-header">
                 <div class="user-info">
@@ -628,18 +625,15 @@
                 </div>
             </div>
             
-            <!-- Tabs -->
             <div class="tabs">
                 <button class="tab active" id="chatsTab" onclick="showChats()">Chats</button>
                 <button class="tab" id="contactsTab" onclick="showContacts()">Contacts</button>
             </div>
             
-            <!-- Chats List -->
             <div class="chat-list" id="chatList">
                 <div class="loading">No chats yet. Add contacts to start chatting!</div>
             </div>
             
-            <!-- Contacts List -->
             <div class="contacts-list" id="contactsList">
                 <div class="add-contact-section">
                     <div class="add-contact-input">
@@ -653,32 +647,27 @@
             </div>
         </div>
 
-        <!-- Main Chat Area -->
         <div class="chat-main" id="chatMain">
             <div class="empty-chat" id="emptyChat">
                 <div style="font-size: 100px;">🔐</div>
                 <h2>Secure Messaging</h2>
                 <p>Your messages are private. Only your contacts can message you.</p>
                 <p>Add contacts to start secure conversations.</p>
-            </div>
-
-            <!-- Active Chat -->
+            </div> 
             <div id="activeChat" style="display: none; flex: 1; flex-direction: column;">
                 <div class="chat-header">
                     <div class="chat-header-info">
                         <button class="icon-btn" onclick="toggleSidebar()">☰</button>
                         <div class="chat-avatar" id="chatAvatar">
                             <span id="chatAvatarText">U</span>
-                        </div>
+                            </div>
                         <div class="chat-header-details">
                             <div class="chat-header-name" id="chatName">Select a chat</div>
                             <div class="chat-header-status" id="chatStatus">offline</div>
                         </div>
                     </div>
                 </div>
-                
                 <div class="messages-container" id="messagesContainer"></div>
-                
                 <div class="message-input-container">
                     <div style="flex: 1;">
                         <div class="attachment-preview" id="attachmentPreview">
@@ -691,29 +680,22 @@
                         <div style="display: flex; gap: 10px; align-items: flex-end;">
                             <button class="icon-btn" onclick="document.getElementById('fileInput').click()" title="Attach file">📎</button>
                             <input type="file" id="fileInput" style="display:none;" onchange="handleFileSelect(event)" accept="image/*,application/pdf,.doc,.docx,.txt,.zip,.mp4,.mp3">
-                            <textarea 
-                                class="message-input" 
-                                id="messageInput" 
-                                placeholder="Type a message" 
-                                rows="1"
-                                onkeypress="handleKeyPress(event)"
-                                oninput="handleTyping(); autoResize(this)"
-                            ></textarea>
+                            <textarea class="message-input" id="messageInput" placeholder="Type a message" rows="1" onkeypress="handleKeyPress(event)" oninput="handleTyping(); autoResize(this)" ></textarea>
                             <button class="send-btn" onclick="sendMessage()">➤</button>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
-    </div>
+    </div> 
 
-    <!-- Socket.io -->
     <script src="/socket.io/socket.io.js"></script>
     <script>
         let socket = null;
         let authToken = null;
         let currentUser = null;
         let currentChatId = null;
+        let currentChatTarget = null; // NEW: Store the username of the other participant
         let chats = new Map();
         let contacts = [];
         let typingTimeout = null;
@@ -721,9 +703,9 @@
         let selectedFile = null;
         let isLoginMode = true;
 
-        // Check for saved token
+        // --- CORE FIX: Use sessionStorage for tab-specific session ---
         window.addEventListener('load', () => {
-            const savedToken = localStorage.getItem('authToken');
+            const savedToken = sessionStorage.getItem('authToken');
             if (savedToken) {
                 authToken = savedToken;
                 initSocket();
@@ -751,7 +733,6 @@
                 switchBtn.textContent = 'Sign In';
                 confirmInput.style.display = 'block';
             }
-            
             clearMessages();
         }
 
@@ -778,33 +759,31 @@
             const username = document.getElementById('usernameInput').value.trim();
             const password = document.getElementById('passwordInput').value;
             const confirmPassword = document.getElementById('confirmPasswordInput').value;
-            
+
             if (!username || !password) {
                 showError('Please enter username and password');
                 return;
             }
-            
+
             if (!isLoginMode && password !== confirmPassword) {
                 showError('Passwords do not match');
                 return;
             }
-            
+
             const endpoint = isLoginMode ? '/api/login' : '/api/register';
-            
+
             try {
                 const response = await fetch(endpoint, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ username, password })
                 });
-                
+
                 const data = await response.json();
-                
+
                 if (response.ok) {
                     authToken = data.token;
-                    localStorage.setItem('authToken', authToken);
+                    sessionStorage.setItem('authToken', authToken); // <-- FIX: Use sessionStorage
                     
                     if (!isLoginMode) {
                         showSuccess('Account created successfully! Logging you in...');
@@ -822,184 +801,559 @@
             }
         }
 
+        function logout() {
+            socket.disconnect();
+            sessionStorage.removeItem('authToken'); // <-- FIX: Use sessionStorage
+            currentUser = null;
+            currentChatId = null;
+            chats = new Map();
+            contacts = [];
+            
+            document.getElementById('authScreen').style.display = 'flex';
+            document.getElementById('chatScreen').style.display = 'none';
+            document.getElementById('usernameInput').value = '';
+            document.getElementById('passwordInput').value = '';
+            document.getElementById('confirmPasswordInput').value = '';
+            clearMessages();
+            document.getElementById('chatList').innerHTML = '<div class="loading">No chats yet. Add contacts to start chatting!</div>';
+            showEmptyChat();
+            console.log("Logged out.");
+        }
+
         function initSocket() {
+            if (socket) {
+                socket.disconnect();
+            }
+            
             socket = io({
                 transports: ['websocket', 'polling'],
                 reconnection: true
             });
 
             socket.on('connect', () => {
-                console.log('Connected to server');
+                console.log('Socket connected, authenticating...');
                 socket.emit('authenticate', { token: authToken });
             });
 
             socket.on('auth-success', (data) => {
+                console.log('Authentication successful');
                 currentUser = data;
+                
                 document.getElementById('authScreen').style.display = 'none';
-                document.getElementById('chatScreen').classList.add('active');
+                document.getElementById('chatScreen').style.display = 'flex';
                 
-                const initials = data.username.substring(0, 2).toUpperCase();
-                document.getElementById('userAvatar').textContent = initials;
-                document.getElementById('userName').textContent = data.username;
+                document.getElementById('userName').textContent = currentUser.username;
+                document.getElementById('userAvatar').textContent = currentUser.username.charAt(0).toUpperCase();
+
+                renderChats(data.chats);
                 
-                contacts = data.contacts || [];
+                // Fetch contacts after auth
+                getContacts();
                 
-                if (data.chats && data.chats.length > 0) {
-                    data.chats.forEach(chat => {
-                        chats.set(chat.chatId, chat);
-                    });
-                    renderChatList();
+                // If a chat was active before refresh, try to re-open it
+                if (currentChatTarget) {
+                    const existingChat = Array.from(chats.values()).find(c => c.name === currentChatTarget);
+                    if (existingChat) {
+                        selectChat(existingChat);
+                    } else {
+                        // If no chat object, try to start new chat (e.g., first chat attempt)
+                        socket.emit('start-chat', { targetUsername: currentChatTarget });
+                    }
+                } else {
+                    showEmptyChat();
                 }
-                
-                socket.emit('get-contacts');
             });
 
             socket.on('auth-failed', (data) => {
-                localStorage.removeItem('authToken');
-                showError(data.error || 'Authentication failed');
+                console.error('Authentication failed:', data.error);
+                logout();
+                showError(data.error);
             });
 
-            socket.on('contacts-list', (contactsList) => {
-                contacts = contactsList;
-                renderContactsList();
+            socket.on('contacts-list', (data) => {
+                contacts = data.contacts;
+                renderContacts(contacts);
             });
 
-            socket.on('contact-added', (contact) => {
-                contacts.push(contact);
-                renderContactsList();
-                showSuccess(`${contact.username} added to contacts!`);
+            socket.on('contact-added', (data) => {
+                contacts.push(data);
+                renderContacts(contacts);
+                showSuccess(`Contact ${data.username} added!`);
             });
 
             socket.on('contact-removed', (data) => {
                 contacts = contacts.filter(c => c.username !== data.username);
-                renderContactsList();
-            });
-
-            socket.on('contact-error', (data) => {
-                alert(data.error);
-            });
-
-            socket.on('chat-started', (data) => {
-                chats.set(data.chatId, data);
-                renderChatList();
-                selectChat(data.chatId);
-                showChats();
-            });
-
-            socket.on('chat-error', (data) => {
-                alert(data.error);
-            });
-
-            socket.on('new-chat', (data) => {
-                if (!chats.has(data.chatId)) {
-                    chats.set(data.chatId, {
-                        ...data,
-                        messages: []
-                    });
-                    renderChatList();
-                }
-            });
-
-            socket.on('new-message', (data) => {
-                const chat = chats.get(data.chatId);
-                if (chat) {
-                    if (!chat.messages) chat.messages = [];
-                    chat.messages.push(data.message);
-                    
-                    chat.lastMessage = {
-                        text: data.message.text || '📎 File',
-                        time: data.message.timestamp
-                    };
-                    
-                    renderChatList();
-                    
-                    if (currentChatId === data.chatId) {
-                        renderMessages();
-                        scrollToBottom();
-                    }
-                }
-            });
-
-            socket.on('file-uploaded', (data) => {
-                if (data.chatId === currentChatId && selectedFile) {
-                    socket.emit('send-message', {
-                        chatId: currentChatId,
-                        text: document.getElementById('messageInput').value.trim(),
-                        file: data.file
-                    });
-                    
-                    document.getElementById('messageInput').value = '';
-                    removeAttachment();
+                renderContacts(contacts);
+                showSuccess(`Contact ${data.username} removed!`);
+                // Close chat if it was open
+                if (currentChatTarget === data.username) {
+                    currentChatId = null;
+                    currentChatTarget = null;
+                    showEmptyChat();
                 }
             });
 
             socket.on('contact-online', (data) => {
-                const contact = contacts.find(c => c.username === data.username);
-                if (contact) {
-                    contact.online = true;
-                }
-                
-                chats.forEach(chat => {
-                    if (chat.name === data.username) {
-                        chat.online = true;
-                    }
-                });
-                
-                renderContactsList();
-                renderChatList();
+                updateContactStatus(data.username, true);
+                updateChatStatus(data.username, true);
             });
 
             socket.on('contact-offline', (data) => {
-                const contact = contacts.find(c => c.username === data.username);
-                if (contact) {
-                    contact.online = false;
+                updateContactStatus(data.username, false);
+                updateChatStatus(data.username, false);
+            });
+
+            socket.on('new-chat', (data) => {
+                chats.set(data.chatId, data);
+                renderChats(Array.from(chats.values()));
+            });
+
+            socket.on('chat-started', (data) => {
+                chats.set(data.chatId, data);
+                selectChat(data);
+                // Render chats again to make sure the new one is visible/on top
+                renderChats(Array.from(chats.values())); 
+                // Display initial messages
+                displayMessages(data.messages);
+                scrollToBottom();
+            });
+
+            socket.on('new-message', (data) => {
+                const { chatId, message } = data;
+                
+                // CORE FIX: If active chat, append message and scroll
+                if (chatId === currentChatId) {
+                    appendMessage(message);
+                    scrollToBottom();
                 }
                 
-                chats.forEach(chat => {
-                    if (chat.name === data.username) {
-                        chat.online = false;
-                    }
-                });
-                
-                renderContactsList();
-                renderChatList();
+                // CORE FIX: Update the chat list item preview and reorder (for all messages)
+                updateChatListItem(chatId, message);
             });
 
             socket.on('user-typing', (data) => {
-                if (currentChatId === data.chatId) {
-                    const statusElement = document.getElementById('chatStatus');
-                    if (data.isTyping) {
-                        statusElement.textContent = 'typing...';
-                        statusElement.classList.add('typing-indicator');
-                    } else {
-                        statusElement.classList.remove('typing-indicator');
-                        const chat = chats.get(currentChatId);
-                        statusElement.textContent = chat?.online ? 'online' : 'offline';
-                    }
+                if (data.chatId === currentChatId && data.username === currentChatTarget) {
+                    document.getElementById('chatStatus').textContent = data.isTyping ? 'typing...' : (chats.get(currentChatId).online ? 'online' : 'offline');
                 }
             });
 
             socket.on('messages-loaded', (data) => {
-                const chat = chats.get(data.chatId);
-                if (chat) {
-                    chat.messages = data.messages;
-                    if (currentChatId === data.chatId) {
-                        renderMessages();
-                    }
+                if (data.chatId === currentChatId) {
+                    displayMessages(data.messages);
+                    scrollToBottom();
                 }
+            });
+
+            socket.on('chat-error', (data) => {
+                console.error('Chat Error:', data.error);
+                alert('Chat Error: ' + data.error);
+            });
+
+            socket.on('disconnect', () => {
+                console.log('Socket disconnected');
             });
         }
 
-        function logout() {
-            if (confirm('Are you sure you want to logout?')) {
-                localStorage.removeItem('authToken');
-                if (socket) {
-                    socket.disconnect();
-                }
-                location.reload();
+        // --- NEW UTILITY FUNCTIONS FOR MESSAGE PROBLEMS FIX ---
+
+        function scrollToBottom() {
+            const container = document.getElementById('messagesContainer');
+            if (container) {
+                container.scrollTop = container.scrollHeight;
             }
         }
 
+        function updateChatListItem(chatId, message) {
+            const chatItem = document.getElementById(`chat-item-${chatId}`);
+            if (chatItem) {
+                const chat = chats.get(chatId);
+                if (chat) {
+                    // Update last message text
+                    const lastMessageElement = chatItem.querySelector('.chat-last-message');
+                    if (lastMessageElement) {
+                        let previewText = message.text || (message.file ? getFileIcon(message.file.mimetype) + ' ' + message.file.originalName : 'File');
+                        
+                        // Prepend sender name if it's not the current user
+                        if (message.senderUsername !== currentUser.username) {
+                            previewText = `${message.senderUsername}: ${previewText}`;
+                        } else {
+                            // Prepend "You:" for the sender
+                            previewText = `You: ${previewText}`;
+                        }
+                        
+                        lastMessageElement.textContent = previewText;
+                    }
+
+                    // Move chat item to the top
+                    const chatList = document.getElementById('chatList');
+                    if (chatList && chatItem !== chatList.firstElementChild) {
+                        chatList.prepend(chatItem);
+                    }
+                }
+            }
+        }
+
+        // --- UI/RENDER LOGIC (Updated to use new helper functions) ---
+
+        function renderChats(chatsArray) {
+            const chatList = document.getElementById('chatList');
+            chatList.innerHTML = '';
+
+            if (chatsArray.length === 0) {
+                chatList.innerHTML = '<div class="loading">No chats yet. Add contacts to start chatting!</div>';
+                return;
+            }
+
+            // Sort chats by last message time (descending) - assuming the server sends the chats with the correct last message info
+            chatsArray.sort((a, b) => (b.lastMessage ? b.lastMessage.time : 0) - (a.lastMessage ? a.lastMessage.time : 0));
+
+            chatsArray.forEach(chat => {
+                const otherParticipant = chat.participants.find(p => p !== currentUser.username);
+                if (!otherParticipant) return; // Should not happen in private chat
+
+                const chatItem = document.createElement('div');
+                chatItem.className = `chat-item ${chat.chatId === currentChatId ? 'active' : ''}`;
+                chatItem.id = `chat-item-${chat.chatId}`;
+                chatItem.onclick = () => selectChat(chat);
+                
+                // Determine last message preview
+                let lastMsgText = chat.lastMessage ? (chat.lastMessage.text || (chat.lastMessage.file ? getFileIcon(chat.lastMessage.file.mimetype) + ' ' + chat.lastMessage.file.originalName : 'File')) : 'Start chatting!';
+                
+                if (chat.lastMessage) {
+                    if (chat.lastMessage.senderUsername === currentUser.username) {
+                         lastMsgText = `You: ${lastMsgText}`;
+                    } else {
+                         lastMsgText = `${chat.lastMessage.senderUsername}: ${lastMsgText}`;
+                    }
+                }
+
+                chatItem.innerHTML = `
+                    <div class="chat-avatar" id="chat-avatar-${chat.chatId}">
+                        <span id="chat-avatar-text-${chat.chatId}">${otherParticipant.charAt(0).toUpperCase()}</span>
+                        <span class="online-indicator" id="online-indicator-${otherParticipant}" style="display: ${chat.online ? 'block' : 'none'};"></span>
+                    </div>
+                    <div class="chat-details">
+                        <div class="chat-name">${otherParticipant}</div>
+                        <div class="chat-last-message">${lastMsgText}</div>
+                    </div>
+                `;
+                chatList.appendChild(chatItem);
+
+                // Update the chat map to ensure we have the chat object stored
+                chats.set(chat.chatId, { ...chat, name: otherParticipant });
+            });
+        }
+
+        function renderContacts(contactsArray) {
+            const contactsContainer = document.getElementById('contactsContainer');
+            contactsContainer.innerHTML = '';
+
+            if (contactsArray.length === 0) {
+                contactsContainer.innerHTML = '<div class="loading">No contacts yet. Add someone to start chatting!</div>';
+                return;
+            }
+
+            contactsArray.forEach(contact => {
+                const contactItem = document.createElement('div');
+                contactItem.className = 'contact-item';
+                contactItem.id = `contact-item-${contact.username}`;
+                
+                const onlineDisplay = contact.online ? 'block' : 'none';
+
+                contactItem.innerHTML = `
+                    <div class="contact-avatar">
+                        <span>${contact.username.charAt(0).toUpperCase()}</span>
+                        <span class="online-indicator" id="contact-online-indicator-${contact.username}" style="display: ${onlineDisplay};"></span>
+                    </div>
+                    <div class="contact-details">
+                        <div class="contact-name">${contact.username}</div>
+                        <div class="contact-status" id="contact-status-${contact.username}">${contact.online ? 'Online' : 'Offline'}</div>
+                    </div>
+                    <div class="contact-actions">
+                        <button class="contact-btn chat" onclick="startChat('${contact.username}')">Chat</button>
+                    </div>
+                `;
+                contactsContainer.appendChild(contactItem);
+            });
+        }
+
+        function selectChat(chat) {
+            if (currentChatId) {
+                const prevChatEl = document.getElementById(`chat-item-${currentChatId}`);
+                if (prevChatEl) prevChatEl.classList.remove('active');
+            }
+            
+            // Set new active chat state
+            currentChatId = chat.chatId;
+            currentChatTarget = chat.name;
+            
+            // Update UI elements
+            const newChatEl = document.getElementById(`chat-item-${currentChatId}`);
+            if (newChatEl) newChatEl.classList.add('active');
+            
+            document.getElementById('emptyChat').style.display = 'none';
+            document.getElementById('activeChat').style.display = 'flex';
+            
+            document.getElementById('chatName').textContent = chat.name;
+            document.getElementById('chatAvatarText').textContent = chat.name.charAt(0).toUpperCase();
+            
+            const chatHeaderAvatar = document.querySelector('#activeChat .chat-avatar');
+            if (chatHeaderAvatar) {
+                let onlineIndicator = chatHeaderAvatar.querySelector('.online-indicator');
+                if (!onlineIndicator) {
+                    onlineIndicator = document.createElement('span');
+                    onlineIndicator.className = 'online-indicator';
+                    onlineIndicator.id = 'chat-header-online-indicator';
+                    chatHeaderAvatar.appendChild(onlineIndicator);
+                }
+                onlineIndicator.style.display = chat.online ? 'block' : 'none';
+            }
+            document.getElementById('chatStatus').textContent = chat.online ? 'online' : 'offline';
+            
+            // Clear message container and request messages
+            document.getElementById('messagesContainer').innerHTML = '<div class="loading">Loading messages...</div>';
+            socket.emit('get-messages', { chatId: currentChatId });
+            
+            // Hide sidebar on mobile
+            if (window.innerWidth <= 768) {
+                document.getElementById('sidebar').classList.add('hidden');
+            }
+        }
+
+        function displayMessages(messages) {
+            const container = document.getElementById('messagesContainer');
+            container.innerHTML = '';
+            messages.forEach(msg => appendMessage(msg));
+        }
+
+        function appendMessage(message) {
+            const container = document.getElementById('messagesContainer');
+            const messageEl = document.createElement('div');
+            messageEl.className = `message ${message.sent ? 'sent' : 'received'}`;
+
+            const time = new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            
+            let messageContent = `<div class="message-text">${escapeHtml(message.text)}</div>`;
+
+            if (message.file) {
+                const isImage = message.file.mimetype.startsWith('image/');
+                const isVideo = message.file.mimetype.startsWith('video/');
+
+                if (isImage) {
+                    messageContent += `<img class="message-image" src="${message.file.url}" alt="Image" onclick="window.open('${message.file.url}', '_blank')">`;
+                } else if (isVideo) {
+                    messageContent += `<video class="message-image" controls src="${message.file.url}" onclick="window.open('${message.file.url}', '_blank')"></video>`;
+                } else {
+                    messageContent += `
+                        <a href="${message.file.url}" target="_blank" class="message-file">
+                            <div class="file-info">
+                                <span class="file-icon">${getFileIcon(message.file.mimetype)}</span>
+                                <div>
+                                    <div class="file-name">${message.file.originalName}</div>
+                                    <div class="file-size">${formatBytes(message.file.size)}</div>
+                                </div>
+                            </div>
+                        </a>
+                    `;
+                }
+            }
+            
+            messageEl.innerHTML = `
+                ${messageContent}
+                <div class="message-meta">${time}</div>
+            `;
+            
+            container.appendChild(messageEl);
+        }
+
+        async function sendMessage() {
+            const messageInput = document.getElementById('messageInput');
+            const text = messageInput.value.trim();
+
+            if (!currentChatId || (!text && !selectedFile)) {
+                return;
+            }
+
+            let fileInfo = null;
+            let finalMessageText = text;
+
+            // 1. Handle File Upload if present
+            if (selectedFile) {
+                try {
+                    const uploadResponse = await uploadFile(selectedFile);
+                    if (uploadResponse.success) {
+                        fileInfo = uploadResponse.file;
+                        // Use a default text if only a file is being sent
+                        if (!text) finalMessageText = fileInfo.originalName;
+                    } else {
+                        showError(uploadResponse.error || 'File upload failed');
+                        return;
+                    }
+                } catch (error) {
+                    showError('Error during file upload: ' + error.message);
+                    return;
+                }
+            }
+
+            // 2. Send the message
+            socket.emit('send-message', { 
+                chatId: currentChatId, 
+                text: finalMessageText, 
+                file: fileInfo 
+            });
+
+            // 3. Clean up
+            messageInput.value = '';
+            messageInput.style.height = '20px'; // Reset textarea height
+            removeAttachment();
+            
+            // Stop typing indicator instantly after sending
+            if (isTyping) {
+                socket.emit('typing', { chatId: currentChatId, isTyping: false });
+                isTyping = false;
+            }
+        }
+        
+        async function uploadFile(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // Use the standard Authorization header pattern
+            const response = await fetch('/api/upload', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${authToken}` 
+                },
+                body: formData
+            });
+
+            return response.json();
+        }
+
+        // --- CONTACT/CHAT ACTIONS ---
+
+        function startChat(targetUsername) {
+            const existingChat = Array.from(chats.values()).find(c => c.name === targetUsername);
+            if (existingChat) {
+                selectChat(existingChat);
+            } else {
+                // Save the target, in case the server needs to reload the page or if the user refreshes
+                currentChatTarget = targetUsername;
+                socket.emit('start-chat', { targetUsername });
+            }
+            
+            // Switch to chats tab
+            showChats();
+        }
+
+        async function addContact() {
+            const input = document.getElementById('addContactInput');
+            const contactUsername = input.value.trim();
+
+            if (!contactUsername) {
+                alert('Please enter a username to add.');
+                return;
+            }
+
+            try {
+                // Use the standard Authorization header pattern
+                const response = await fetch('/api/add-contact', {
+                    method: 'POST',
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}` 
+                    },
+                    body: JSON.stringify({ contactUsername })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    input.value = '';
+                    // The socket event 'contact-added' will handle UI update
+                } else {
+                    showError(data.error || 'Failed to add contact');
+                }
+            } catch (error) {
+                showError('Network error. Failed to add contact.');
+            }
+        }
+        
+        function getContacts() {
+             // We can use the REST API here, but for simplicity in a Socket.IO app,
+             // let's rely on the socket event if possible, or just re-fetch using the API
+             // The auth-success already contains the list, but for a standalone re-fetch:
+             socket.emit('get-contacts'); 
+        }
+
+        // --- TYPING INDICATOR AND UI ---
+
+        function handleTyping() {
+            if (!currentChatId) return;
+
+            // Handle the input for the message input container to auto-resize
+            autoResize(document.getElementById('messageInput'));
+
+            if (!isTyping) {
+                isTyping = true;
+                socket.emit('typing', { chatId: currentChatId, isTyping: true });
+            }
+
+            clearTimeout(typingTimeout);
+            typingTimeout = setTimeout(() => {
+                isTyping = false;
+                socket.emit('typing', { chatId: currentChatId, isTyping: false });
+            }, 3000); 
+        }
+
+        function autoResize(element) {
+            element.style.height = 'auto';
+            element.style.height = (element.scrollHeight) + 'px';
+        }
+
+        function handleKeyPress(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        }
+        
+        function updateContactStatus(username, isOnline) {
+            // Update sidebar contact list
+            const contactStatusEl = document.getElementById(`contact-status-${username}`);
+            const contactIndicatorEl = document.getElementById(`contact-online-indicator-${username}`);
+            
+            if (contactStatusEl) contactStatusEl.textContent = isOnline ? 'Online' : 'Offline';
+            if (contactIndicatorEl) contactIndicatorEl.style.display = isOnline ? 'block' : 'none';
+            
+            // Update sidebar chat list
+            const chatOnlineIndicator = document.getElementById(`online-indicator-${username}`);
+            if (chatOnlineIndicator) chatOnlineIndicator.style.display = isOnline ? 'block' : 'none';
+
+            // Update local chat object for state
+            const chat = Array.from(chats.values()).find(c => c.name === username);
+            if (chat) chat.online = isOnline;
+        }
+
+        function updateChatStatus(username, isOnline) {
+            if (currentChatTarget === username) {
+                const statusEl = document.getElementById('chatStatus');
+                statusEl.textContent = isOnline ? 'online' : 'offline';
+
+                const chatHeaderAvatar = document.querySelector('#activeChat .chat-avatar');
+                if (chatHeaderAvatar) {
+                    const onlineIndicator = document.getElementById('chat-header-online-indicator');
+                    if (onlineIndicator) onlineIndicator.style.display = isOnline ? 'block' : 'none';
+                }
+            }
+        }
+        
+        function toggleSidebar() {
+            if (window.innerWidth <= 768) {
+                document.getElementById('sidebar').classList.toggle('hidden');
+            }
+        }
+        
         function showChats() {
             document.getElementById('chatsTab').classList.add('active');
             document.getElementById('contactsTab').classList.remove('active');
@@ -1014,301 +1368,49 @@
             document.getElementById('contactsList').classList.add('active');
         }
 
-        function addContact() {
-            const input = document.getElementById('addContactInput');
-            const username = input.value.trim();
-            
-            if (!username) {
-                alert('Please enter a username');
-                return;
-            }
-            
-            if (username === currentUser.username) {
-                alert('You cannot add yourself as a contact');
-                input.value = '';
-                return;
-            }
-            
-            socket.emit('add-contact', { contactUsername: username });
-            input.value = '';
+        function showEmptyChat() {
+            document.getElementById('emptyChat').style.display = 'flex';
+            document.getElementById('activeChat').style.display = 'none';
+            document.getElementById('chatName').textContent = 'Select a chat';
+            document.getElementById('chatStatus').textContent = 'offline';
         }
 
-        function removeContact(username) {
-            if (confirm(`Remove ${username} from contacts?`)) {
-                socket.emit('remove-contact', { contactUsername: username });
-            }
-        }
-
-        function startChatWithContact(username) {
-            socket.emit('start-chat', { targetUsername: username });
-        }
-
-        function renderContactsList() {
-            const container = document.getElementById('contactsContainer');
-            
-            if (contacts.length === 0) {
-                container.innerHTML = '<div class="loading">No contacts yet. Add someone to start chatting!</div>';
-                return;
-            }
-            
-            container.innerHTML = '';
-            contacts.forEach(contact => {
-                const contactDiv = document.createElement('div');
-                contactDiv.className = 'contact-item';
-                
-                const initials = contact.username.substring(0, 2).toUpperCase();
-                
-                contactDiv.innerHTML = `
-                    <div class="contact-avatar">
-                        ${initials}
-                        ${contact.online ? '<span class="online-indicator"></span>' : ''}
-                    </div>
-                    <div class="contact-details">
-                        <div class="contact-name">${contact.username}</div>
-                        <div class="contact-status">${contact.online ? 'Online' : 'Offline'}</div>
-                    </div>
-                    <div class="contact-actions">
-                        <button class="contact-btn chat" onclick="startChatWithContact('${contact.username}')">Chat</button>
-                        <button class="contact-btn remove" onclick="removeContact('${contact.username}')">Remove</button>
-                    </div>
-                `;
-                
-                container.appendChild(contactDiv);
-            });
-        }
-
-        function renderChatList() {
-            const chatList = document.getElementById('chatList');
-            
-            if (chats.size === 0) {
-                chatList.innerHTML = '<div class="loading">No chats yet. Add contacts to start chatting!</div>';
-                return;
-            }
-
-            chatList.innerHTML = '';
-            chats.forEach((chat, chatId) => {
-                const chatItem = document.createElement('div');
-                chatItem.className = 'chat-item' + (chatId === currentChatId ? ' active' : '');
-                chatItem.onclick = () => selectChat(chatId);
-                
-                const initials = chat.name.substring(0, 2).toUpperCase();
-                const lastMessageText = chat.lastMessage?.text || 'Start a conversation';
-                const time = chat.lastMessage?.time ? formatTime(chat.lastMessage.time) : '';
-                
-                chatItem.innerHTML = `
-                    <div class="chat-avatar">
-                        ${initials}
-                        ${chat.online ? '<span class="online-indicator"></span>' : ''}
-                    </div>
-                    <div class="chat-details">
-                        <div class="chat-name">${chat.name}</div>
-                        <div class="chat-last-message">${lastMessageText}</div>
-                    </div>
-                    ${time ? `<div style="font-size: 12px; color: #8696a0;">${time}</div>` : ''}
-                `;
-                
-                chatList.appendChild(chatItem);
-            });
-        }
-
-        function selectChat(chatId) {
-            currentChatId = chatId;
-            const chat = chats.get(chatId);
-            
-            if (!chat) return;
-            
-            document.getElementById('emptyChat').style.display = 'none';
-            document.getElementById('activeChat').style.display = 'flex';
-            
-            const initials = chat.name.substring(0, 2).toUpperCase();
-            document.getElementById('chatAvatarText').textContent = initials;
-            document.getElementById('chatName').textContent = chat.name;
-            document.getElementById('chatStatus').textContent = chat.online ? 'online' : 'offline';
-            
-            if (!chat.messages || chat.messages.length === 0) {
-                socket.emit('get-messages', { chatId });
-            } else {
-                renderMessages();
-            }
-            
-            renderChatList();
-            document.getElementById('messageInput').focus();
-        }
-
-        function renderMessages() {
-            const container = document.getElementById('messagesContainer');
-            const chat = chats.get(currentChatId);
-            
-            if (!chat || !chat.messages || chat.messages.length === 0) {
-                container.innerHTML = '<div class="loading">No messages yet. Start the conversation!</div>';
-                return;
-            }
-            
-            container.innerHTML = '';
-            chat.messages.forEach(msg => {
-                const messageDiv = document.createElement('div');
-                messageDiv.className = 'message ' + (msg.sent ? 'sent' : 'received');
-                
-                let content = '';
-                
-                if (!msg.sent) {
-                    content += `<div class="message-sender">${msg.senderUsername}</div>`;
-                }
-                
-                if (msg.text) {
-                    content += `<div class="message-text">${escapeHtml(msg.text)}</div>`;
-                }
-                
-                if (msg.file) {
-                    const isImage = /\.(jpg|jpeg|png|gif|webp)$/i.test(msg.file.originalName);
-                    
-                    if (isImage) {
-                        content += `
-                            <a href="${msg.file.url}" target="_blank">
-                                <img src="${msg.file.url}" alt="${msg.file.originalName}" class="message-image">
-                            </a>
-                        `;
-                    } else {
-                        const icon = getFileIcon(msg.file.mimetype);
-                        content += `
-                            <div class="message-file">
-                                <div class="file-info">
-                                    <span class="file-icon">${icon}</span>
-                                    <div>
-                                        <a href="${msg.file.url}" target="_blank" class="file-name" download="${msg.file.originalName}">
-                                            ${msg.file.originalName}
-                                        </a>
-                                        <div class="file-size">${formatFileSize(msg.file.size)}</div>
-                                    </div>
-                                </div>
-                            </div>
-                        `;
-                    }
-                }
-                
-                content += `
-                    <div class="message-meta">
-                        <span>${formatTime(msg.timestamp)}</span>
-                    </div>
-                `;
-                
-                messageDiv.innerHTML = content;
-                container.appendChild(messageDiv);
-            });
-            
-            scrollToBottom();
-        }
+        // --- FILE HANDLING ---
 
         function handleFileSelect(event) {
             const file = event.target.files[0];
             if (!file) return;
-            
-            if (file.size > 10 * 1024 * 1024) {
-                alert('File size must be less than 10MB');
-                event.target.value = '';
+
+            if (file.size > 10 * 1024 * 1024) { // 10MB limit
+                alert('File size exceeds the 10MB limit.');
+                removeAttachment();
                 return;
             }
-            
+
             selectedFile = file;
-            
             const preview = document.getElementById('attachmentPreview');
-            const previewName = document.getElementById('previewName');
-            const previewSize = document.getElementById('previewSize');
+            document.getElementById('previewName').textContent = file.name;
+            document.getElementById('previewSize').textContent = formatBytes(file.size);
             
-            previewName.textContent = file.name;
-            previewSize.textContent = formatFileSize(file.size);
             preview.classList.add('active');
-            
-            document.getElementById('messageInput').focus();
         }
 
         function removeAttachment() {
             selectedFile = null;
-            document.getElementById('fileInput').value = '';
+            document.getElementById('fileInput').value = ''; // Clear file input
             document.getElementById('attachmentPreview').classList.remove('active');
         }
 
-        function sendMessage() {
-            const messageInput = document.getElementById('messageInput');
-            const text = messageInput.value.trim();
-            
-            if (!currentChatId || (!text && !selectedFile)) return;
-            
-            if (selectedFile) {
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    socket.emit('upload-file', {
-                        chatId: currentChatId,
-                        fileData: e.target.result,
-                        fileName: selectedFile.name,
-                        fileType: selectedFile.type
-                    });
-                };
-                reader.readAsDataURL(selectedFile);
-            } else {
-                socket.emit('send-message', {
-                    chatId: currentChatId,
-                    text: text
-                });
-                messageInput.value = '';
-                autoResize(messageInput);
-            }
-        }
+        function formatBytes(bytes, decimals = 2) {
+            if (bytes === 0) return '0 Bytes';
 
-        function handleKeyPress(event) {
-            if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault();
-                sendMessage();
-            }
-        }
+            const k = 1024;
+            const dm = decimals < 0 ? 0 : decimals;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
 
-        function handleTyping() {
-            if (!currentChatId) return;
-            
-            if (!isTyping) {
-                isTyping = true;
-                socket.emit('typing', { chatId: currentChatId, isTyping: true });
-            }
-            
-            clearTimeout(typingTimeout);
-            typingTimeout = setTimeout(() => {
-                isTyping = false;
-                socket.emit('typing', { chatId: currentChatId, isTyping: false });
-            }, 1000);
-        }
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
 
-        function autoResize(textarea) {
-            textarea.style.height = 'auto';
-            textarea.style.height = Math.min(textarea.scrollHeight, 100) + 'px';
-        }
-
-        function scrollToBottom() {
-            const container = document.getElementById('messagesContainer');
-            setTimeout(() => {
-                container.scrollTop = container.scrollHeight;
-            }, 100);
-        }
-
-        function toggleSidebar() {
-            const sidebar = document.getElementById('sidebar');
-            sidebar.classList.toggle('hidden');
-        }
-
-        function formatTime(timestamp) {
-            const date = new Date(timestamp);
-            const now = new Date();
-            
-            if (date.toDateString() === now.toDateString()) {
-                return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-            } else {
-                return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-            }
-        }
-
-        function formatFileSize(bytes) {
-            if (bytes < 1024) return bytes + ' B';
-            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
         }
 
         function getFileIcon(mimetype) {
@@ -1317,12 +1419,13 @@
             if (mimetype.startsWith('video/')) return '🎥';
             if (mimetype.startsWith('audio/')) return '🎵';
             if (mimetype.includes('pdf')) return '📄';
-            if (mimetype.includes('zip')) return '📦';
+            if (mimetype.includes('zip') || mimetype.includes('compressed')) return '📦';
             if (mimetype.includes('doc')) return '📝';
             return '📎';
         }
 
         function escapeHtml(text) {
+            if (typeof text !== 'string') return text;
             const map = {
                 '&': '&amp;',
                 '<': '&lt;',
