@@ -695,13 +695,16 @@
         let authToken = null;
         let currentUser = null;
         let currentChatId = null;
-        let currentChatTarget = null; // NEW: Store the username of the other participant
+        let currentChatTarget = null; // Store the username of the other participant
         let chats = new Map();
+        let chatsPagination = new Map(); // NEW: { chatId: { offset: number, hasMore: boolean } }
+        let isFetchingOlderMessages = false; // NEW: Throttle flag
         let contacts = [];
         let typingTimeout = null;
         let isTyping = false;
         let selectedFile = null;
         let isLoginMode = true;
+        const MESSAGE_LOAD_LIMIT = 50; // Must match server.js limit
 
         // --- CORE FIX: Use sessionStorage for tab-specific session ---
         window.addEventListener('load', () => {
@@ -807,6 +810,7 @@
             currentUser = null;
             currentChatId = null;
             chats = new Map();
+            chatsPagination = new Map(); // Clear pagination state
             contacts = [];
             
             document.getElementById('authScreen').style.display = 'flex';
@@ -910,24 +914,22 @@
 
             socket.on('chat-started', (data) => {
                 chats.set(data.chatId, data);
-                selectChat(data);
-                // Render chats again to make sure the new one is visible/on top
-                renderChats(Array.from(chats.values())); 
-                // Display initial messages
-                displayMessages(data.messages);
-                scrollToBottom();
+                // The messages will be loaded in selectChat, so no need to call displayMessages here
+                // Instead, ensure selectChat is called correctly
+                const chat = chats.get(data.chatId);
+                if (chat) {
+                    selectChat(chat); 
+                }
             });
 
             socket.on('new-message', (data) => {
                 const { chatId, message } = data;
                 
-                // CORE FIX: If active chat, append message and scroll
                 if (chatId === currentChatId) {
                     appendMessage(message);
                     scrollToBottom();
                 }
                 
-                // CORE FIX: Update the chat list item preview and reorder (for all messages)
                 updateChatListItem(chatId, message);
             });
 
@@ -937,10 +939,34 @@
                 }
             });
 
+            // UPDATED: Initial message load handler
             socket.on('messages-loaded', (data) => {
-                if (data.chatId === currentChatId) {
-                    displayMessages(data.messages);
+                const { chatId, messages, totalMessages, hasMore } = data;
+                if (chatId === currentChatId) {
+                    displayMessages(messages);
+                    
+                    // Update pagination state
+                    chatsPagination.set(chatId, { 
+                        offset: messages.length, 
+                        hasMore: hasMore
+                    });
+                    
+                    // Scroll to bottom only on initial load
                     scrollToBottom();
+                }
+            });
+
+            // NEW: Older messages loaded handler
+            socket.on('older-messages-loaded', (data) => {
+                const { chatId, messages, offset, hasMore } = data;
+                if (chatId === currentChatId) {
+                    prependMessages(messages);
+                    
+                    // Update pagination state
+                    chatsPagination.set(chatId, { 
+                        offset: offset, 
+                        hasMore: hasMore
+                    });
                 }
             });
 
@@ -954,37 +980,84 @@
             });
         }
 
-        // --- NEW UTILITY FUNCTIONS FOR MESSAGE PROBLEMS FIX ---
+        // --- NEW SCROLL AND PAGINATION FUNCTIONS ---
+        
+        function handleScroll(event) {
+            const container = event.target;
+            const pagination = chatsPagination.get(currentChatId);
 
+            // Check if user scrolled to the very top (within 5 pixels for browser variations)
+            if (container.scrollTop <= 5 && pagination && pagination.hasMore && !isFetchingOlderMessages) {
+                console.log('Scrolled to top. Fetching older messages...');
+                isFetchingOlderMessages = true;
+                
+                // Show a loading indicator at the top
+                container.insertAdjacentHTML('afterbegin', '<div id="loadingOlder" class="loading" style="padding: 10px; font-size: 14px;">Loading older messages...</div>');
+
+                socket.emit('get-older-messages', {
+                    chatId: currentChatId,
+                    offset: pagination.offset
+                });
+            }
+        }
+        
+        function prependMessages(messages) {
+            const container = document.getElementById('messagesContainer');
+            const loadingIndicator = document.getElementById('loadingOlder');
+            const oldScrollHeight = container.scrollHeight;
+            
+            // Remove the loading indicator
+            if (loadingIndicator) {
+                loadingIndicator.remove();
+            }
+
+            if (messages.length === 0) {
+                 container.insertAdjacentHTML('afterbegin', '<div class="loading" style="padding: 10px; font-size: 14px;">No more messages</div>');
+                 isFetchingOlderMessages = false;
+                 return;
+            }
+
+            // Prepend messages in reverse order to maintain chronological order in the array
+            messages.reverse().forEach(message => {
+                const messageEl = createMessageElement(message);
+                container.prepend(messageEl);
+            });
+            
+            // Adjust scroll position to maintain view (the scroll height has increased by the height of the new messages)
+            const newScrollHeight = container.scrollHeight;
+            container.scrollTop = newScrollHeight - oldScrollHeight;
+            
+            isFetchingOlderMessages = false;
+        }
+
+        // --- OLDER UTILITY FUNCTIONS (Modified to support the new structure) ---
+        
         function scrollToBottom() {
             const container = document.getElementById('messagesContainer');
             if (container) {
-                container.scrollTop = container.scrollHeight;
+                // Use smooth behavior for a better UX
+                container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
             }
         }
-
+        
         function updateChatListItem(chatId, message) {
             const chatItem = document.getElementById(`chat-item-${chatId}`);
             if (chatItem) {
                 const chat = chats.get(chatId);
                 if (chat) {
-                    // Update last message text
                     const lastMessageElement = chatItem.querySelector('.chat-last-message');
                     if (lastMessageElement) {
                         let previewText = message.text || (message.file ? getFileIcon(message.file.mimetype) + ' ' + message.file.originalName : 'File');
                         
-                        // Prepend sender name if it's not the current user
                         if (message.senderUsername !== currentUser.username) {
                             previewText = `${message.senderUsername}: ${previewText}`;
                         } else {
-                            // Prepend "You:" for the sender
                             previewText = `You: ${previewText}`;
                         }
                         
                         lastMessageElement.textContent = previewText;
                     }
 
-                    // Move chat item to the top
                     const chatList = document.getElementById('chatList');
                     if (chatList && chatItem !== chatList.firstElementChild) {
                         chatList.prepend(chatItem);
@@ -992,8 +1065,59 @@
                 }
             }
         }
+        
+        function createMessageElement(message) {
+            const messageEl = document.createElement('div');
+            messageEl.className = `message ${message.sent ? 'sent' : 'received'}`;
 
-        // --- UI/RENDER LOGIC (Updated to use new helper functions) ---
+            const time = new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            
+            let messageContent = `<div class="message-text">${escapeHtml(message.text)}</div>`;
+
+            if (message.file) {
+                const isImage = message.file.mimetype.startsWith('image/');
+                const isVideo = message.file.mimetype.startsWith('video/');
+
+                if (isImage) {
+                    messageContent += `<img class="message-image" src="${message.file.url}" alt="Image" onclick="window.open('${message.file.url}', '_blank')">`;
+                } else if (isVideo) {
+                    messageContent += `<video class="message-image" controls src="${message.file.url}" onclick="window.open('${message.file.url}', '_blank')"></video>`;
+                } else {
+                    messageContent += `
+                        <a href="${message.file.url}" target="_blank" class="message-file">
+                            <div class="file-info">
+                                <span class="file-icon">${getFileIcon(message.file.mimetype)}</span>
+                                <div>
+                                    <div class="file-name">${message.file.originalName}</div>
+                                    <div class="file-size">${formatBytes(message.file.size)}</div>
+                                </div>
+                            </div>
+                        </a>
+                    `;
+                }
+            }
+            
+            messageEl.innerHTML = `
+                ${messageContent}
+                <div class="message-meta">${time}</div>
+            `;
+            return messageEl;
+        }
+
+        function appendMessage(message) {
+            const container = document.getElementById('messagesContainer');
+            const messageEl = createMessageElement(message);
+            container.appendChild(messageEl);
+        }
+        
+        function displayMessages(messages) {
+            const container = document.getElementById('messagesContainer');
+            container.innerHTML = ''; // Clear container
+            messages.forEach(msg => {
+                const messageEl = createMessageElement(msg);
+                container.appendChild(messageEl);
+            });
+        }
 
         function renderChats(chatsArray) {
             const chatList = document.getElementById('chatList');
@@ -1004,19 +1128,17 @@
                 return;
             }
 
-            // Sort chats by last message time (descending) - assuming the server sends the chats with the correct last message info
             chatsArray.sort((a, b) => (b.lastMessage ? b.lastMessage.time : 0) - (a.lastMessage ? a.lastMessage.time : 0));
 
             chatsArray.forEach(chat => {
                 const otherParticipant = chat.participants.find(p => p !== currentUser.username);
-                if (!otherParticipant) return; // Should not happen in private chat
+                if (!otherParticipant) return; 
 
                 const chatItem = document.createElement('div');
                 chatItem.className = `chat-item ${chat.chatId === currentChatId ? 'active' : ''}`;
                 chatItem.id = `chat-item-${chat.chatId}`;
                 chatItem.onclick = () => selectChat(chat);
                 
-                // Determine last message preview
                 let lastMsgText = chat.lastMessage ? (chat.lastMessage.text || (chat.lastMessage.file ? getFileIcon(chat.lastMessage.file.mimetype) + ' ' + chat.lastMessage.file.originalName : 'File')) : 'Start chatting!';
                 
                 if (chat.lastMessage) {
@@ -1039,7 +1161,6 @@
                 `;
                 chatList.appendChild(chatItem);
 
-                // Update the chat map to ensure we have the chat object stored
                 chats.set(chat.chatId, { ...chat, name: otherParticipant });
             });
         }
@@ -1111,59 +1232,22 @@
             document.getElementById('chatStatus').textContent = chat.online ? 'online' : 'offline';
             
             // Clear message container and request messages
-            document.getElementById('messagesContainer').innerHTML = '<div class="loading">Loading messages...</div>';
+            const messagesContainer = document.getElementById('messagesContainer');
+            messagesContainer.innerHTML = '<div class="loading">Loading messages...</div>';
+            
+            // Attach scroll handler
+            messagesContainer.onscroll = handleScroll;
+
+            // Reset/Initialize pagination state
+            chatsPagination.set(chat.chatId, { offset: 0, hasMore: true });
+
+            // Request initial message batch
             socket.emit('get-messages', { chatId: currentChatId });
             
             // Hide sidebar on mobile
             if (window.innerWidth <= 768) {
                 document.getElementById('sidebar').classList.add('hidden');
             }
-        }
-
-        function displayMessages(messages) {
-            const container = document.getElementById('messagesContainer');
-            container.innerHTML = '';
-            messages.forEach(msg => appendMessage(msg));
-        }
-
-        function appendMessage(message) {
-            const container = document.getElementById('messagesContainer');
-            const messageEl = document.createElement('div');
-            messageEl.className = `message ${message.sent ? 'sent' : 'received'}`;
-
-            const time = new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            
-            let messageContent = `<div class="message-text">${escapeHtml(message.text)}</div>`;
-
-            if (message.file) {
-                const isImage = message.file.mimetype.startsWith('image/');
-                const isVideo = message.file.mimetype.startsWith('video/');
-
-                if (isImage) {
-                    messageContent += `<img class="message-image" src="${message.file.url}" alt="Image" onclick="window.open('${message.file.url}', '_blank')">`;
-                } else if (isVideo) {
-                    messageContent += `<video class="message-image" controls src="${message.file.url}" onclick="window.open('${message.file.url}', '_blank')"></video>`;
-                } else {
-                    messageContent += `
-                        <a href="${message.file.url}" target="_blank" class="message-file">
-                            <div class="file-info">
-                                <span class="file-icon">${getFileIcon(message.file.mimetype)}</span>
-                                <div>
-                                    <div class="file-name">${message.file.originalName}</div>
-                                    <div class="file-size">${formatBytes(message.file.size)}</div>
-                                </div>
-                            </div>
-                        </a>
-                    `;
-                }
-            }
-            
-            messageEl.innerHTML = `
-                ${messageContent}
-                <div class="message-meta">${time}</div>
-            `;
-            
-            container.appendChild(messageEl);
         }
 
         async function sendMessage() {
@@ -1280,9 +1364,6 @@
         }
         
         function getContacts() {
-             // We can use the REST API here, but for simplicity in a Socket.IO app,
-             // let's rely on the socket event if possible, or just re-fetch using the API
-             // The auth-success already contains the list, but for a standalone re-fetch:
              socket.emit('get-contacts'); 
         }
 
@@ -1319,18 +1400,15 @@
         }
         
         function updateContactStatus(username, isOnline) {
-            // Update sidebar contact list
             const contactStatusEl = document.getElementById(`contact-status-${username}`);
             const contactIndicatorEl = document.getElementById(`contact-online-indicator-${username}`);
             
             if (contactStatusEl) contactStatusEl.textContent = isOnline ? 'Online' : 'Offline';
             if (contactIndicatorEl) contactIndicatorEl.style.display = isOnline ? 'block' : 'none';
             
-            // Update sidebar chat list
             const chatOnlineIndicator = document.getElementById(`online-indicator-${username}`);
             if (chatOnlineIndicator) chatOnlineIndicator.style.display = isOnline ? 'block' : 'none';
 
-            // Update local chat object for state
             const chat = Array.from(chats.values()).find(c => c.name === username);
             if (chat) chat.online = isOnline;
         }
